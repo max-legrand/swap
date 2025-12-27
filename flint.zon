@@ -1,0 +1,19 @@
+.{
+    .tasks = .{
+        .{
+            .name = "build",
+            .cmd = "./build.sh",
+            .watcher = .{
+                "src/.*\\.zig",
+                "Swap/Swap/.*",
+            },
+        },
+        .{
+            .name = "build-lib",
+            .cmd = "zig build --release=fast",
+            .watcher = .{
+                "src/.*\\.zig",
+            },
+        },
+    },
+}

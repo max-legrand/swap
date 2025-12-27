@@ -1,0 +1,7 @@
+.zig-cache/
+zig-out/
+Swap/build
+Swap/Swap.xcframework/
+Swap/buildServer.json
+Swap/Swap.xcodeproj/xcuserdata/
+Swap/Swap.xcodeproj/project.xcworkspace/xcuserdata/

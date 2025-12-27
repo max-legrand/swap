@@ -1,0 +1,5 @@
+// This makes Swap available to the XCode build for the macOS app.
+module SwapKit {
+    umbrella header "swap.h"
+    export *
+}

@@ -1,0 +1,25 @@
+// MIT License
+// Copyright (c) 2025 Max Legrand
+// See LICENSE for full terms.
+
+.{
+    .name = .swap,
+    .version = "0.0.0",
+    .fingerprint = 0x25938561692cb618, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .zig_objc = .{
+            .url = "git+https://github.com/mitchellh/zig-objc.git#f356ed02833f0f1b8e84d50bed9e807bf7cdc0ae",
+            .hash = "zig_objc-0.0.0-Ir_Sp5gTAQCvxxR7oVIrPXxXwsfKgVP7_wqoOQrZjFeK",
+        },
+        .sort = .{
+            .url = "git+https://github.com/max-legrand/sort#834173e2a10f12a11e2a230cd527db1e4b9146f4",
+            .hash = "sort-0.0.0-BiJUBJdDAAAojqQX9wU4HxFWJspm8k_k2mZreEX1Ns6n",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
