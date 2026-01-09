@@ -28,6 +28,16 @@ color=#CDC1FF
 mode=toggle
 ```
 
+# Dependencies
+
+## Required
+
+- [yabai](https://github.com/koekeishiya/yabai) - Required for switching to windows on different Spaces. Install via Homebrew:
+  ```bash
+  brew install koekeishiya/formulae/yabai
+  yabai --start-service
+  ```
+
 # Build from source
 
 ## Requirements

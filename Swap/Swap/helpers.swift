@@ -120,14 +120,9 @@ func openSelectedWindow() {
         guard index < sharedAppStore.windows.count else { return }
         let window = sharedAppStore.windows[index]
 
-        if let app = NSRunningApplication(processIdentifier: window.pid) {
-            // Raise the window - this triggers space switching when needed
-            raiseWindow(pid: window.pid, windowName: window.name, targetWindowId: window.windowId, isMinimized: window.isMinimized)
-            
-            // Then activate the app
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                app.activate()
-            }
+        if let _ = NSRunningApplication(processIdentifier: window.pid) {
+            // Focus the specific window - this should trigger space switch to wherever the window is
+            focusWindowById(pid: window.pid, windowId: window.windowId, windowName: window.name, isMinimized: window.isMinimized)
         } else {
             // App not running, try to open by path
             NSWorkspace.shared.openApplication(
@@ -142,54 +137,142 @@ func openSelectedWindow() {
 @_silgen_name("_AXUIElementGetWindow")
 func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
 
-
-
-func raiseWindow(pid: Int32, windowName: String, targetWindowId: UInt32, isMinimized: Bool) {
-    let appElement = AXUIElementCreateApplication(pid)
-
-    var windowsRef: CFTypeRef?
-    let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef)
-
-    guard result == .success, let windows = windowsRef as? [AXUIElement] else {
-        return
+// Get yabai path if available
+func getYabaiPath() -> String? {
+    // Check common locations
+    let possiblePaths = [
+        "/opt/homebrew/bin/yabai",
+        "/usr/local/bin/yabai",
+        "/run/current-system/sw/bin/yabai"  // NixOS
+    ]
+    
+    for path in possiblePaths {
+        if FileManager.default.fileExists(atPath: path) {
+            return path
+        }
     }
+    
+    // Try which
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+    process.arguments = ["yabai"]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = pipe
+    
+    do {
+        try process.run()
+        process.waitUntilExit()
+        if process.terminationStatus == 0 {
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+                return path
+            }
+        }
+    } catch {}
+    
+    return nil
+}
 
-    // Helper to focus a window (handles unminimize and raise)
-    func focusWindow(_ window: AXUIElement, isMinimized: Bool) {
+// Focus a window using yabai
+func focusWindowViaYabai(windowId: UInt32) -> Bool {
+    guard let yabaiPath = getYabaiPath() else {
+        return false
+    }
+    
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: yabaiPath)
+    process.arguments = ["-m", "window", "--focus", "\(windowId)"]
+    
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = pipe
+    
+    do {
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    } catch {
+        return false
+    }
+}
+
+// Focus a specific window by its window ID, switching spaces if needed
+func focusWindowById(pid: Int32, windowId: UInt32, windowName: String, isMinimized: Bool) {
+    let appElement = AXUIElementCreateApplication(pid)
+    
+    // Helper to focus a window via AX
+    func focusWindowAX(_ window: AXUIElement) {
         if isMinimized {
             AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, false as CFTypeRef)
+            usleep(50000)
         }
-        // Set as main window and raise
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
     }
-
-    // First try to match by window ID (most accurate)
-    if targetWindowId != 0 {
-        for window in windows {
-            var axWindowId: CGWindowID = 0
-            if _AXUIElementGetWindow(window, &axWindowId) == .success && axWindowId == targetWindowId {
-                focusWindow(window, isMinimized: isMinimized)
-                return
+    
+    // Try to find window via AX attributes
+    func findWindowViaAX() -> AXUIElement? {
+        var windowsRef: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef)
+        
+        guard result == .success, let windows = windowsRef as? [AXUIElement] else {
+            return nil
+        }
+        
+        // Try to match by window ID
+        if windowId != 0 {
+            for window in windows {
+                var axWindowId: CGWindowID = 0
+                if _AXUIElementGetWindow(window, &axWindowId) == .success && axWindowId == windowId {
+                    return window
+                }
             }
         }
-    }
-
-    // Fallback: match by exact title
-    for window in windows {
-        var titleRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
-
-        if let title = titleRef as? String, title == windowName {
-            focusWindow(window, isMinimized: isMinimized)
-            return
+        
+        // Fallback: match by exact title
+        for window in windows {
+            var titleRef: CFTypeRef?
+            AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef)
+            if let title = titleRef as? String, title == windowName {
+                return window
+            }
         }
+        
+        return nil
     }
+    
+    // Check if window is on current space by trying to find it via AX
+    if let window = findWindowViaAX() {
+        focusWindowAX(window)
+    if let app = NSRunningApplication(processIdentifier: pid) {
+        app.activate()
+    }
+    return
+}
 
-    // Last resort: raise the first window
-    if let firstWindow = windows.first {
-        focusWindow(firstWindow, isMinimized: isMinimized)
-    }
+ // Window is on a different space/monitor - use yabai to focus
+ if focusWindowViaYabai(windowId: windowId) {
+     usleep(200000)
+     
+     // Now focus via AX to ensure proper focus
+     if let window = findWindowViaAX() {
+         focusWindowAX(window)
+     }
+     if let app = NSRunningApplication(processIdentifier: pid) {
+         app.activate()
+     }
+     return
+ }
+ 
+ // Final fallback - just activate the app
+ if let app = NSRunningApplication(processIdentifier: pid) {
+     app.activate()
+ }
+}
+
+func raiseWindow(pid: Int32, windowName: String, targetWindowId: UInt32, isMinimized: Bool) {
+    focusWindowById(pid: pid, windowId: targetWindowId, windowName: windowName, isMinimized: isMinimized)
 }
 
 @_cdecl("switchToWindowsMode")
