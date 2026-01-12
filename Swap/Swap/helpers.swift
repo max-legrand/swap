@@ -120,6 +120,10 @@ func openSelectedWindow() {
         guard index < sharedAppStore.windows.count else { return }
         let window = sharedAppStore.windows[index]
 
+        if let ad = AppDelegate.shared ?? (NSApplication.shared.delegate as? AppDelegate) {
+            ad.clearPreviousApp()
+        }
+
         if let _ = NSRunningApplication(processIdentifier: window.pid) {
             // Focus the specific window - this should trigger space switch to wherever the window is
             focusWindowById(pid: window.pid, windowId: window.windowId, windowName: window.name, isMinimized: window.isMinimized)

@@ -361,6 +361,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func clearPreviousApp() {
+        previousApp = nil
+    }
+
     func hideWindow() {
         if let window = self.window {
             window.orderOut(nil)
