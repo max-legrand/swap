@@ -623,7 +623,25 @@ fn killWindow() void {
 
     const target_window_id = WINDOW_IDS[GLOBAL_STATE.index];
     if (target_window_id == 0) {
-        GLOBAL_STATE.logCallback("killWindow: target_window_id == 0") catch {};
+        const pid = WINDOW_PIDS[GLOBAL_STATE.index];
+        if (pid == 0) {
+            GLOBAL_STATE.logCallback("killWindow: target_window_id == 0, pid == 0") catch {};
+            return;
+        }
+
+        const msg = std.fmt.allocPrint(ALLOCATOR, "killWindow: no window id, killing pid={d}", .{pid}) catch null;
+        if (msg) |m| {
+            GLOBAL_STATE.logCallback(m) catch {};
+            ALLOCATOR.free(m);
+        }
+
+        const pid_str = std.fmt.allocPrint(ALLOCATOR, "{d}", .{pid}) catch return;
+        defer ALLOCATOR.free(pid_str);
+        var child = std.process.Child.init(
+            &[_][]const u8{ "kill", pid_str },
+            ALLOCATOR,
+        );
+        child.spawn() catch {};
         return;
     }
 
