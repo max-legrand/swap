@@ -673,6 +673,9 @@ pub fn getWindowList(allocator: std.mem.Allocator) ![]WindowListItem {
         }
     }
 
+    // Record count of on-screen windows before adding minimized ones
+    const on_screen_count = result.items.len;
+
     if (g_window_info_cache) |cache| {
         const cache_count = c.CFArrayGetCount(cache);
         const number_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, "kCGWindowNumber", c.kCFStringEncodingUTF8);
@@ -711,6 +714,51 @@ pub fn getWindowList(allocator: std.mem.Allocator) ![]WindowListItem {
                     .is_hidden = false,
                 });
             }
+        }
+    }
+
+    // Sort on-screen windows by global z-order (front-to-back).
+    // Use kCGWindowListOptionOnScreenOnly which returns windows in true global z-order
+    // across all monitors (unlike kCGWindowListOptionAll or per-space CGS iteration).
+    // When a window is focused, macOS moves it to the front of the z-stack, so this
+    // effectively gives MRU ordering.
+    if (on_screen_count > 1) {
+        const on_screen_list = c.CGWindowListCopyWindowInfo(
+            c.kCGWindowListOptionOnScreenOnly | c.kCGWindowListExcludeDesktopElements,
+            c.kCGNullWindowID,
+        );
+        if (on_screen_list) |list| {
+            defer c.CFRelease(list);
+
+            var z_order = std.AutoHashMap(c.CGWindowID, u32).init(allocator);
+            defer z_order.deinit();
+
+            const list_count = c.CFArrayGetCount(list);
+            const number_key = c.CFStringCreateWithCString(c.kCFAllocatorDefault, "kCGWindowNumber", c.kCFStringEncodingUTF8);
+            defer c.CFRelease(number_key);
+
+            var z_idx: u32 = 0;
+            for (0..@intCast(list_count)) |i| {
+                const win_dict: c.CFDictionaryRef = @ptrCast(c.CFArrayGetValueAtIndex(list, @intCast(i)));
+                const number_value = c.CFDictionaryGetValue(win_dict, number_key);
+                if (number_value == null) continue;
+                var wid: c.CGWindowID = 0;
+                if (c.CFNumberGetValue(@ptrCast(number_value), c.kCFNumberIntType, &wid) == 0) continue;
+                z_order.put(wid, z_idx) catch {};
+                z_idx += 1;
+            }
+
+            // Sort only the on-screen portion by global z-order.
+            // Minimized windows (appended after on_screen_count) keep their position at the end.
+            const on_screen_slice = result.items[0..on_screen_count];
+            const z_ctx = z_order;
+            std.mem.sort(WindowListItem, on_screen_slice, z_ctx, struct {
+                fn lessThan(ctx: std.AutoHashMap(c.CGWindowID, u32), a: WindowListItem, b_item: WindowListItem) bool {
+                    const a_z = ctx.get(a.window_id) orelse std.math.maxInt(u32);
+                    const b_z = ctx.get(b_item.window_id) orelse std.math.maxInt(u32);
+                    return a_z < b_z;
+                }
+            }.lessThan);
         }
     }
 

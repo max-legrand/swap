@@ -246,33 +246,44 @@ func focusWindowById(pid: Int32, windowId: UInt32, windowName: String, isMinimiz
         return nil
     }
     
-    // Check if window is on current space by trying to find it via AX
-    if let window = findWindowViaAX() {
-        focusWindowAX(window)
-    if let app = NSRunningApplication(processIdentifier: pid) {
-        app.activate()
+    // Always try yabai first for window focusing. yabai handles cross-monitor and
+    // cross-space switching correctly, which pure AX APIs cannot do reliably.
+    // Without yabai, AXRaiseAction + app.activate() on the same app's window on a
+    // different monitor will NOT move focus to that monitor - the AX API can see all
+    // windows regardless of monitor, so the old "AX-first, yabai-fallback" approach
+    // would take the AX branch and never reach yabai for same-app cross-monitor windows.
+    if windowId != 0 && focusWindowViaYabai(windowId: windowId) {
+        // yabai successfully focused the window (handles space/monitor switch).
+        // Give it a moment to complete the space transition, then reinforce via AX.
+        usleep(100000)
+        
+        // Activate the app and raise the window to ensure full focus
+        if let app = NSRunningApplication(processIdentifier: pid) {
+            app.activate(options: .activateIgnoringOtherApps)
+        }
+        if let window = findWindowViaAX() {
+            focusWindowAX(window)
+        }
+        return
     }
-    return
-}
-
- // Window is on a different space/monitor - use yabai to focus
- if focusWindowViaYabai(windowId: windowId) {
-     usleep(200000)
-     
-     // Now focus via AX to ensure proper focus
-     if let window = findWindowViaAX() {
-         focusWindowAX(window)
-     }
-     if let app = NSRunningApplication(processIdentifier: pid) {
-         app.activate()
-     }
-     return
- }
- 
- // Final fallback - just activate the app
- if let app = NSRunningApplication(processIdentifier: pid) {
-     app.activate()
- }
+    
+    // yabai not available or failed - fall back to AX-only focusing.
+    // This works correctly for windows on the current monitor/space.
+    if let window = findWindowViaAX() {
+        // Activate the app FIRST (with activateIgnoringOtherApps), then raise the window.
+        // This ordering is important: activation brings the app to the foreground,
+        // and then kAXRaiseAction ensures the correct window is on top.
+        if let app = NSRunningApplication(processIdentifier: pid) {
+            app.activate(options: .activateIgnoringOtherApps)
+        }
+        focusWindowAX(window)
+        return
+    }
+    
+    // Final fallback - just activate the app
+    if let app = NSRunningApplication(processIdentifier: pid) {
+        app.activate(options: .activateIgnoringOtherApps)
+    }
 }
 
 func raiseWindow(pid: Int32, windowName: String, targetWindowId: UInt32, isMinimized: Bool) {

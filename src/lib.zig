@@ -483,6 +483,7 @@ fn keybind_callback(_: c.CGEventTapProxy, event_type: c.CGEventType, event: c.CG
                 killWindow();
                 updateWindows();
             }
+            return null;
         } else if (keycode == keys.escape) {
             GLOBAL_STATE.window_visible = false;
             hideWindow();
