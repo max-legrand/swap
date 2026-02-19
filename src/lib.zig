@@ -444,13 +444,13 @@ fn keybind_callback(_: c.CGEventTapProxy, event_type: c.CGEventType, event: c.CG
         // Use appropriate list length based on current mode
         const list_len = if (GLOBAL_STATE.mode == .apps) GLOBAL_STATE.apps.len else WINDOW_COUNT;
 
-        if (keycode == keys.up_arrow or (keycode == keys.k_key and cmd_pressed)) {
+        if (keycode == keys.up_arrow or (keycode == keys.k_key and cmd_pressed) or (keycode == keys.p_key and ctrl_pressed)) {
             if (list_len > 0 and GLOBAL_STATE.index > 0) {
                 GLOBAL_STATE.index -= 1;
                 updateApps();
             }
             return null;
-        } else if (keycode == keys.down_arrow or (keycode == keys.j_key and cmd_pressed)) {
+        } else if (keycode == keys.down_arrow or (keycode == keys.j_key and cmd_pressed) or (keycode == keys.n_key and ctrl_pressed)) {
             if (list_len > 0 and GLOBAL_STATE.index < list_len - 1) {
                 GLOBAL_STATE.index += 1;
                 updateApps();
@@ -466,7 +466,7 @@ fn keybind_callback(_: c.CGEventTapProxy, event_type: c.CGEventType, event: c.CG
                 updateApps();
             }
             return null;
-        } else if (keycode == keys.enter) {
+        } else if (keycode == keys.enter or (keycode == keys.y_key and ctrl_pressed)) {
             if (GLOBAL_STATE.mode == .apps) {
                 openApp();
             } else {
