@@ -15,6 +15,7 @@ const utils = @import("utils.zig");
 const ALLOCATOR = utils.allocator;
 const config = @import("config.zig");
 const keys = @import("keys.zig");
+const history = @import("history.zig");
 
 const KeybindMode = enum(u8) {
     toggle = 0,
@@ -23,7 +24,7 @@ const KeybindMode = enum(u8) {
 
 const DisplayMode = enum { apps, windows };
 
-const AppState = struct {
+pub const AppState = struct {
     log_file: std.fs.File,
     apps: []*application.App,
     windows: []*darwin.WindowInfo,
@@ -32,12 +33,13 @@ const AppState = struct {
     config: config.Config,
     mode: DisplayMode,
     has_screen_recording_perms: bool,
+    search_history: history.History,
 
-    const Self = @This();
+    const Self = AppState;
 
     pub fn init() !AppState {
         const cfg = try config.parseConfig(ALLOCATOR);
-        var state = Self{
+        var state: Self = .{
             .log_file = try std.fs.createFileAbsolute(cfg.log_file_path, .{ .truncate = false }),
             .apps = &[_]*application.App{},
             .index = 0,
@@ -46,15 +48,20 @@ const AppState = struct {
             .config = cfg,
             .mode = .apps,
             .has_screen_recording_perms = false,
+            .search_history = try history.History.init(ALLOCATOR),
         };
         try state.logCallback("swap_init");
         return state;
     }
 
     pub fn deinit(self: *Self) void {
-        self.logCallback("swap_deinit") catch {};
+        self.search_history.deinit();
+        self.logCallback("swap_deinit") catch {
+            std.debug.print("Failed to log swap_deinit\n", .{});
+        };
         self.config.deinit(ALLOCATOR);
         self.log_file.close();
+        self.* = undefined;
     }
 
     pub fn logCallback(self: *Self, msg: []const u8) !void {
@@ -69,22 +76,23 @@ const AppState = struct {
     }
 };
 
-var GLOBAL_STATE: AppState = undefined;
+var Global_State: AppState = undefined;
+var CURRENT_QUERY: []const u8 = "";
 
 export fn swap_init() c_int {
-    GLOBAL_STATE = AppState.init() catch {
+    Global_State = AppState.init() catch {
         return -1;
     };
     return 0;
 }
 
 export fn swap_deinit() void {
-    GLOBAL_STATE.deinit();
+    Global_State.deinit();
     utils.deinitAllocator();
 }
 
 export fn get_timestamp() c_long {
-    GLOBAL_STATE.logCallback("get_timestamp") catch {};
+    Global_State.logCallback("get_timestamp") catch {};
     return @intCast(std.time.milliTimestamp());
 }
 
@@ -189,6 +197,9 @@ fn fuzzApps(allocator: std.mem.Allocator, apps: []*application.App, query: []con
             score -= 1000; // Large bonus for prefix matches
         }
 
+        const recency_bonus = Global_State.search_history.getRecencyBonus(query, app_name);
+        score += recency_bonus;
+
         // Add app to scored list
         const copy_app = allocator.create(application.App) catch continue;
         copy_app.* = .{
@@ -268,15 +279,19 @@ pub export fn get_apps(query_opt: ?[*:0]u8) ?*AppReturn {
     var should_free_query_apps = false;
 
     if (std.mem.eql(u8, query, "")) {
-        GLOBAL_STATE.logCallback("get_apps : NULL") catch {};
+        if (CURRENT_QUERY.len > 0) ALLOCATOR.free(CURRENT_QUERY);
+        CURRENT_QUERY = "";
+        Global_State.logCallback("get_apps : NULL") catch {};
         query_apps = application.get_running_apps(ALLOCATOR) catch {
             return null;
         };
     } else {
+        if (CURRENT_QUERY.len > 0) ALLOCATOR.free(CURRENT_QUERY);
+        CURRENT_QUERY = ALLOCATOR.dupe(u8, query) catch "";
         const msg = std.fmt.allocPrint(ALLOCATOR, "get_apps => {s}", .{query}) catch {
             return null;
         };
-        GLOBAL_STATE.logCallback(msg) catch {};
+        Global_State.logCallback(msg) catch {};
         ALLOCATOR.free(msg);
 
         const base_apps = application.get_all_apps(ALLOCATOR) catch {
@@ -308,11 +323,11 @@ pub export fn get_apps(query_opt: ?[*:0]u8) ?*AppReturn {
     }
 
     // Free the old global apps before storing new ones
-    for (GLOBAL_STATE.apps) |a| {
+    for (Global_State.apps) |a| {
         ALLOCATOR.destroy(a);
     }
-    if (GLOBAL_STATE.apps.len > 0) {
-        ALLOCATOR.free(GLOBAL_STATE.apps);
+    if (Global_State.apps.len > 0) {
+        ALLOCATOR.free(Global_State.apps);
     }
 
     const result = ALLOCATOR.create(AppReturn) catch {
@@ -331,7 +346,7 @@ pub export fn get_apps(query_opt: ?[*:0]u8) ?*AppReturn {
     }
 
     const msg_string: []u8 = msg.toOwnedSlice(ALLOCATOR) catch "";
-    GLOBAL_STATE.logCallback(msg_string) catch {};
+    Global_State.logCallback(msg_string) catch {};
     ALLOCATOR.free(msg_string);
 
     result.* = .{
@@ -341,8 +356,8 @@ pub export fn get_apps(query_opt: ?[*:0]u8) ?*AppReturn {
     };
 
     // Store apps in global state for navigation
-    GLOBAL_STATE.apps = query_apps;
-    GLOBAL_STATE.index = 0;
+    Global_State.apps = query_apps;
+    Global_State.index = 0;
 
     var pid_list = std.ArrayList(i64).initCapacity(ALLOCATOR, query_apps.len) catch {
         return null;
@@ -371,11 +386,11 @@ fn keybind_callback(_: c.CGEventTapProxy, event_type: c.CGEventType, event: c.CG
 
     // Handle modifier key releases - close window when Command is released (hold mode only)
     if (event_type == c.kCGEventFlagsChanged) {
-        if (GLOBAL_STATE.config.mode == .hold) {
-            if (GLOBAL_STATE.window_visible and !cmd_pressed) {
-                GLOBAL_STATE.logCallback("command released - closing") catch {};
+        if (Global_State.config.mode == .hold) {
+            if (Global_State.window_visible and !cmd_pressed) {
+                Global_State.logCallback("command released - closing") catch {};
                 openApp();
-                GLOBAL_STATE.window_visible = false;
+                Global_State.window_visible = false;
                 hideWindow();
             }
         }
@@ -387,22 +402,22 @@ fn keybind_callback(_: c.CGEventTapProxy, event_type: c.CGEventType, event: c.CG
 
         // Cmd+Ctrl+. -> Apps mode
         if (keycode == keys.period_key and cmd_pressed and ctrl_pressed) {
-            if (GLOBAL_STATE.window_visible) {
-                if (GLOBAL_STATE.mode == .apps) {
+            if (Global_State.window_visible) {
+                if (Global_State.mode == .apps) {
                     // Already in apps mode, hide window
-                    GLOBAL_STATE.window_visible = false;
+                    Global_State.window_visible = false;
                     hideWindow();
                 } else {
                     // Switch to apps mode
-                    GLOBAL_STATE.mode = .apps;
-                    GLOBAL_STATE.index = 0;
+                    Global_State.mode = .apps;
+                    Global_State.index = 0;
                     switchToAppsMode();
                 }
             } else {
                 // Show window in apps mode
-                GLOBAL_STATE.mode = .apps;
-                GLOBAL_STATE.window_visible = true;
-                GLOBAL_STATE.index = 0;
+                Global_State.mode = .apps;
+                Global_State.window_visible = true;
+                Global_State.index = 0;
                 showWindow();
             }
             return null;
@@ -410,73 +425,73 @@ fn keybind_callback(_: c.CGEventTapProxy, event_type: c.CGEventType, event: c.CG
 
         // Cmd+Ctrl+\ -> Windows mode
         if (keycode == keys.backslash_key and cmd_pressed and ctrl_pressed) {
-            if (!GLOBAL_STATE.has_screen_recording_perms) {
+            if (!Global_State.has_screen_recording_perms) {
                 return event;
             }
 
-            if (GLOBAL_STATE.window_visible) {
-                if (GLOBAL_STATE.mode == .windows) {
+            if (Global_State.window_visible) {
+                if (Global_State.mode == .windows) {
                     // Already in windows mode, hide window
-                    GLOBAL_STATE.window_visible = false;
+                    Global_State.window_visible = false;
                     hideWindow();
                 } else {
                     // Switch to windows mode
-                    GLOBAL_STATE.mode = .windows;
-                    GLOBAL_STATE.index = 0;
+                    Global_State.mode = .windows;
+                    Global_State.index = 0;
                     switchToWindowsMode();
                 }
             } else {
                 // Show window in windows mode
-                GLOBAL_STATE.mode = .windows;
-                GLOBAL_STATE.window_visible = true;
-                GLOBAL_STATE.index = 0;
+                Global_State.mode = .windows;
+                Global_State.window_visible = true;
+                Global_State.index = 0;
                 showWindow();
             }
             return null;
         }
 
         // Only intercept other keys when window is visible
-        if (!GLOBAL_STATE.window_visible) {
+        if (!Global_State.window_visible) {
             return event;
         }
 
         // Handle navigation keys (consume these)
         // Use appropriate list length based on current mode
-        const list_len = if (GLOBAL_STATE.mode == .apps) GLOBAL_STATE.apps.len else WINDOW_COUNT;
+        const list_len = if (Global_State.mode == .apps) Global_State.apps.len else WINDOW_COUNT;
 
         if (keycode == keys.up_arrow or (keycode == keys.k_key and cmd_pressed) or (keycode == keys.p_key and ctrl_pressed)) {
-            if (list_len > 0 and GLOBAL_STATE.index > 0) {
-                GLOBAL_STATE.index -= 1;
+            if (list_len > 0 and Global_State.index > 0) {
+                Global_State.index -= 1;
                 updateApps();
             }
             return null;
         } else if (keycode == keys.down_arrow or (keycode == keys.j_key and cmd_pressed) or (keycode == keys.n_key and ctrl_pressed)) {
-            if (list_len > 0 and GLOBAL_STATE.index < list_len - 1) {
-                GLOBAL_STATE.index += 1;
+            if (list_len > 0 and Global_State.index < list_len - 1) {
+                Global_State.index += 1;
                 updateApps();
             }
             return null;
         } else if (keycode == keys.tab) {
             if (list_len > 0) {
                 if (!shift_pressed) {
-                    GLOBAL_STATE.index = (GLOBAL_STATE.index + 1) % list_len;
+                    Global_State.index = (Global_State.index + 1) % list_len;
                 } else {
-                    GLOBAL_STATE.index = if (GLOBAL_STATE.index == 0) list_len - 1 else GLOBAL_STATE.index - 1;
+                    Global_State.index = if (Global_State.index == 0) list_len - 1 else Global_State.index - 1;
                 }
                 updateApps();
             }
             return null;
         } else if (keycode == keys.enter or (keycode == keys.y_key and ctrl_pressed)) {
-            if (GLOBAL_STATE.mode == .apps) {
+            if (Global_State.mode == .apps) {
                 openApp();
             } else {
                 openWindowOrApp();
             }
-            GLOBAL_STATE.window_visible = false;
+            Global_State.window_visible = false;
             hideWindow();
             return null;
         } else if (keycode == keys.q_key and ctrl_pressed) {
-            if (GLOBAL_STATE.mode == .apps) {
+            if (Global_State.mode == .apps) {
                 killApp();
                 updateApps();
             } else {
@@ -485,13 +500,13 @@ fn keybind_callback(_: c.CGEventTapProxy, event_type: c.CGEventType, event: c.CG
             }
             return null;
         } else if (keycode == keys.escape) {
-            GLOBAL_STATE.window_visible = false;
+            Global_State.window_visible = false;
             hideWindow();
             return null;
         }
 
         // Toggle mode: pass events through as-is (typing works normally)
-        if (GLOBAL_STATE.config.mode == .toggle) {
+        if (Global_State.config.mode == .toggle) {
             return event;
         }
 
@@ -512,9 +527,9 @@ export fn setup_keybind() c_int {
 
 export fn check_for_screen_recording_perms() c_int {
     const has_permission = c.CGPreflightScreenCaptureAccess();
-    GLOBAL_STATE.has_screen_recording_perms = has_permission;
+    Global_State.has_screen_recording_perms = has_permission;
 
-    if (GLOBAL_STATE.config.skip_screen_recording_perms) {
+    if (Global_State.config.skip_screen_recording_perms) {
         return 0;
     }
 
@@ -530,12 +545,12 @@ export fn update_apps() ?*AppReturn {
         return null;
     };
 
-    var items = std.ArrayList(SwapAppInfo).initCapacity(ALLOCATOR, GLOBAL_STATE.apps.len) catch {
+    var items = std.ArrayList(SwapAppInfo).initCapacity(ALLOCATOR, Global_State.apps.len) catch {
         return null;
     };
     defer items.deinit(ALLOCATOR);
 
-    for (GLOBAL_STATE.apps) |a| {
+    for (Global_State.apps) |a| {
         items.appendAssumeCapacity(.{
             .name = ALLOCATOR.dupeZ(u8, std.mem.sliceTo(&a.name, 0)) catch {
                 return null;
@@ -554,21 +569,28 @@ export fn update_apps() ?*AppReturn {
     };
 
     result.* = .{
-        .length = @intCast(GLOBAL_STATE.apps.len),
+        .length = @intCast(Global_State.apps.len),
         .apps = slice.ptr,
-        .idx = GLOBAL_STATE.index,
+        .idx = Global_State.index,
     };
 
-    const msg = std.fmt.allocPrint(ALLOCATOR, "update_apps -> {d}\n", .{GLOBAL_STATE.index}) catch return null;
+    const msg = std.fmt.allocPrint(ALLOCATOR, "update_apps -> {d}\n", .{Global_State.index}) catch return null;
     defer ALLOCATOR.free(msg);
-    GLOBAL_STATE.logCallback(msg) catch {};
+    Global_State.logCallback(msg) catch {};
 
     return result;
 }
 
 fn openApp() void {
-    if (GLOBAL_STATE.apps.len == 0) return;
-    const app = GLOBAL_STATE.apps[GLOBAL_STATE.index];
+    if (Global_State.apps.len == 0) return;
+    const app = Global_State.apps[Global_State.index];
+
+    // Record selection for recency scoring
+    if (CURRENT_QUERY.len > 0) {
+        const app_name = std.mem.sliceTo(&app.name, 0);
+        Global_State.search_history.record(CURRENT_QUERY, app_name) catch {};
+    }
+
     const path: []const u8 = std.mem.sliceTo(&app.path, 0);
     var child = std.process.Child.init(
         &[_][]const u8{ "open", path },
@@ -578,11 +600,11 @@ fn openApp() void {
 }
 
 fn killApp() void {
-    const pid = GLOBAL_STATE.apps[GLOBAL_STATE.index].pid;
-    const name = std.mem.sliceTo(&GLOBAL_STATE.apps[GLOBAL_STATE.index].name, 0);
+    const pid = Global_State.apps[Global_State.index].pid;
+    const name = std.mem.sliceTo(&Global_State.apps[Global_State.index].name, 0);
     const msg = std.fmt.allocPrint(ALLOCATOR, "killApp pid={d} name={s}", .{ pid, name }) catch null;
     if (msg) |m| {
-        GLOBAL_STATE.logCallback(m) catch {};
+        Global_State.logCallback(m) catch {};
     }
 
     const pid_str = std.fmt.allocPrint(ALLOCATOR, "{d}", .{pid}) catch return;
@@ -592,15 +614,15 @@ fn killApp() void {
         ALLOCATOR,
     );
     child.spawn() catch {};
-    var items = std.ArrayList(*application.App).initCapacity(ALLOCATOR, GLOBAL_STATE.apps.len - 1) catch {
+    var items = std.ArrayList(*application.App).initCapacity(ALLOCATOR, Global_State.apps.len - 1) catch {
         return;
     };
-    const apps = GLOBAL_STATE.apps;
-    const index_to_kill = GLOBAL_STATE.index;
-    if (GLOBAL_STATE.index == GLOBAL_STATE.apps.len - 1) {
-        GLOBAL_STATE.index -= 1;
+    const apps = Global_State.apps;
+    const index_to_kill = Global_State.index;
+    if (Global_State.index == Global_State.apps.len - 1) {
+        Global_State.index -= 1;
     }
-    for (GLOBAL_STATE.apps, 0..) |a, i| {
+    for (Global_State.apps, 0..) |a, i| {
         if (i != index_to_kill) {
             items.appendAssumeCapacity(a);
         } else {
@@ -608,49 +630,53 @@ fn killApp() void {
             continue;
         }
     }
-    GLOBAL_STATE.apps = items.toOwnedSlice(ALLOCATOR) catch {
+    Global_State.apps = items.toOwnedSlice(ALLOCATOR) catch {
         return;
     };
     ALLOCATOR.free(apps);
 }
 
-fn killWindow() void {
-    GLOBAL_STATE.logCallback("killWindow: enter") catch {};
+fn quitApp(pid: c_int) void {
+    const pid_str = std.fmt.allocPrint(ALLOCATOR, "{d}", .{pid}) catch return;
+    defer ALLOCATOR.free(pid_str);
+    var child = std.process.Child.init(
+        &[_][]const u8{ "kill", pid_str },
+        ALLOCATOR,
+    );
+    child.spawn() catch {};
+}
 
-    if (GLOBAL_STATE.index >= WINDOW_COUNT) {
-        GLOBAL_STATE.logCallback("killWindow: index >= WINDOW_COUNT") catch {};
+fn killWindow() void {
+    Global_State.logCallback("killWindow: enter") catch {};
+
+    if (Global_State.index >= WINDOW_COUNT) {
+        Global_State.logCallback("killWindow: index >= WINDOW_COUNT") catch {};
         return;
     }
 
-    const target_window_id = WINDOW_IDS[GLOBAL_STATE.index];
+    const target_window_id = WINDOW_IDS[Global_State.index];
     if (target_window_id == 0) {
-        const pid = WINDOW_PIDS[GLOBAL_STATE.index];
+        const pid = WINDOW_PIDS[Global_State.index];
         if (pid == 0) {
-            GLOBAL_STATE.logCallback("killWindow: target_window_id == 0, pid == 0") catch {};
+            Global_State.logCallback("killWindow: target_window_id == 0, pid == 0") catch {};
             return;
         }
 
         const msg = std.fmt.allocPrint(ALLOCATOR, "killWindow: no window id, killing pid={d}", .{pid}) catch null;
         if (msg) |m| {
-            GLOBAL_STATE.logCallback(m) catch {};
+            Global_State.logCallback(m) catch {};
             ALLOCATOR.free(m);
         }
 
-        const pid_str = std.fmt.allocPrint(ALLOCATOR, "{d}", .{pid}) catch return;
-        defer ALLOCATOR.free(pid_str);
-        var child = std.process.Child.init(
-            &[_][]const u8{ "kill", pid_str },
-            ALLOCATOR,
-        );
-        child.spawn() catch {};
+        quitApp(pid);
         return;
     }
 
-    const pid = WINDOW_PIDS[GLOBAL_STATE.index];
+    const pid = WINDOW_PIDS[Global_State.index];
 
     const app_ref = c.AXUIElementCreateApplication(pid);
     if (app_ref == null) {
-        GLOBAL_STATE.logCallback("killWindow: app_ref == null") catch {};
+        Global_State.logCallback("killWindow: app_ref == null") catch {};
         return;
     }
     defer c.CFRelease(app_ref);
@@ -660,11 +686,11 @@ fn killWindow() void {
     defer c.CFRelease(windows_attr);
 
     if (c.AXUIElementCopyAttributeValue(app_ref, windows_attr, &windows_ref) != 0) {
-        GLOBAL_STATE.logCallback("killWindow: failed to get AXWindows") catch {};
+        Global_State.logCallback("killWindow: failed to get AXWindows") catch {};
         return;
     }
     if (windows_ref == null) {
-        GLOBAL_STATE.logCallback("killWindow: windows_ref == null") catch {};
+        Global_State.logCallback("killWindow: windows_ref == null") catch {};
         return;
     }
     defer c.CFRelease(windows_ref);
@@ -673,7 +699,7 @@ fn killWindow() void {
     const count = c.CFArrayGetCount(windows);
 
     const log_msg = std.fmt.allocPrint(ALLOCATOR, "killWindow: searching {d} windows for wid {d}", .{ count, target_window_id }) catch "killWindow: alloc failed";
-    GLOBAL_STATE.logCallback(log_msg) catch {};
+    Global_State.logCallback(log_msg) catch {};
     if (!std.mem.eql(u8, log_msg, "killWindow: alloc failed")) {
         ALLOCATOR.free(log_msg);
     }
@@ -684,13 +710,25 @@ fn killWindow() void {
         var wid: u32 = 0;
         const ax_result = types._AXUIElementGetWindow(win, &wid);
         const wid_msg = std.fmt.allocPrint(ALLOCATOR, "killWindow: window {d} has wid {d}, ax_result={d}", .{ i, wid, ax_result }) catch "killWindow: alloc failed";
-        GLOBAL_STATE.logCallback(wid_msg) catch {};
+        Global_State.logCallback(wid_msg) catch {};
         if (!std.mem.eql(u8, wid_msg, "killWindow: alloc failed")) {
             ALLOCATOR.free(wid_msg);
         }
 
         if (ax_result == 0 and wid == target_window_id) {
-            GLOBAL_STATE.logCallback("killWindow: found match, closing") catch {};
+            Global_State.logCallback("killWindow: found match, closing") catch {};
+
+            // If this is the last window for the app, quit the app instead of
+            // just closing the window (many apps stay alive with no windows open).
+            if (count <= 1) {
+                const quit_msg = std.fmt.allocPrint(ALLOCATOR, "killWindow: last window for pid={d}, quitting app", .{pid}) catch null;
+                if (quit_msg) |m| {
+                    Global_State.logCallback(m) catch {};
+                    ALLOCATOR.free(m);
+                }
+                quitApp(pid);
+                return;
+            }
 
             // Try AXCloseButton -> AXPress first (more reliable)
             const close_button_attr = c.CFStringCreateWithCString(c.kCFAllocatorDefault, "AXCloseButton", c.kCFStringEncodingUTF8);
@@ -704,7 +742,7 @@ fn killWindow() void {
                         defer c.CFRelease(press_action);
                         const press_result = c.AXUIElementPerformAction(@ptrCast(close_button_ref), press_action);
                         const result_msg = std.fmt.allocPrint(ALLOCATOR, "killWindow: AXPress on close button result={d}", .{press_result}) catch "killWindow: alloc failed";
-                        GLOBAL_STATE.logCallback(result_msg) catch {};
+                        Global_State.logCallback(result_msg) catch {};
                         if (!std.mem.eql(u8, result_msg, "killWindow: alloc failed")) {
                             ALLOCATOR.free(result_msg);
                         }
@@ -719,7 +757,7 @@ fn killWindow() void {
                 defer c.CFRelease(close_action);
                 const action_result = c.AXUIElementPerformAction(win, close_action);
                 const result_msg = std.fmt.allocPrint(ALLOCATOR, "killWindow: AXClose result={d}", .{action_result}) catch "killWindow: alloc failed";
-                GLOBAL_STATE.logCallback(result_msg) catch {};
+                Global_State.logCallback(result_msg) catch {};
                 if (!std.mem.eql(u8, result_msg, "killWindow: alloc failed")) {
                     ALLOCATOR.free(result_msg);
                 }
@@ -727,7 +765,7 @@ fn killWindow() void {
             return;
         }
     }
-    GLOBAL_STATE.logCallback("killWindow: no match found") catch {};
+    Global_State.logCallback("killWindow: no match found") catch {};
 }
 
 pub export fn openConfigFile() void {
@@ -744,14 +782,14 @@ pub export fn openConfigFile() void {
 /// Return the current config color as RGB values
 pub export fn getColor() ColorRGB {
     return .{
-        .red = GLOBAL_STATE.config.color.red,
-        .green = GLOBAL_STATE.config.color.green,
-        .blue = GLOBAL_STATE.config.color.blue,
+        .red = Global_State.config.color.red,
+        .green = Global_State.config.color.green,
+        .blue = Global_State.config.color.blue,
     };
 }
 
 pub export fn reloadConfig() u8 {
-    GLOBAL_STATE.config = config.parseConfig(ALLOCATOR) catch {
+    Global_State.config = config.parseConfig(ALLOCATOR) catch {
         return 1;
     };
     return 0;
@@ -813,11 +851,11 @@ pub export fn deinitWindowReturn(window_return: *WindowReturn) void {
 }
 
 pub export fn get_current_mode() u8 {
-    return @intFromEnum(GLOBAL_STATE.mode);
+    return @intFromEnum(Global_State.mode);
 }
 
 pub export fn set_mode(mode: u8) void {
-    GLOBAL_STATE.mode = @enumFromInt(mode);
+    Global_State.mode = @enumFromInt(mode);
 }
 
 var WINDOW_COUNT: usize = 0;
@@ -840,20 +878,20 @@ pub export fn set_window_info(index: usize, window_id: u32, pid: i32, path: [*:0
 }
 
 pub export fn get_selected_index() usize {
-    return GLOBAL_STATE.index;
+    return Global_State.index;
 }
 
 pub export fn set_selected_index(index: usize) void {
-    GLOBAL_STATE.index = index;
+    Global_State.index = index;
 }
 
 fn openWindowOrApp() void {
-    if (GLOBAL_STATE.index >= WINDOW_COUNT) return;
+    if (Global_State.index >= WINDOW_COUNT) return;
 
-    const window_id = WINDOW_IDS[GLOBAL_STATE.index];
+    const window_id = WINDOW_IDS[Global_State.index];
     if (window_id == 0) {
         // No specific window, just open the app by path
-        const path = std.mem.sliceTo(&WINDOW_PATHS[GLOBAL_STATE.index], 0);
+        const path = std.mem.sliceTo(&WINDOW_PATHS[Global_State.index], 0);
         if (path.len > 0) {
             var child = std.process.Child.init(
                 &[_][]const u8{ "open", path },
