@@ -7,6 +7,7 @@ const objc = @import("zig_objc");
 const types = @import("types.zig");
 const c = types.c;
 const application = @import("application.zig");
+const utils = @import("utils.zig");
 const App = application.App;
 const APP_NAME_LEN = application.APP_NAME_LEN;
 const APP_PATH_LEN = application.APP_PATH_LEN;
@@ -114,8 +115,8 @@ pub fn getHiddenAppWindows(allocator: std.mem.Allocator) ![]WindowInfo {
 
         var info = WindowInfo{
             .window_id = 0,
-            .name = [_]u8{0} ** 256,
-            .owner = [_]u8{0} ** 256,
+            .name = @splat(0),
+            .owner = @splat(0),
             .pid = pid,
             .layer = 0,
             .is_on_screen = false,
@@ -253,11 +254,12 @@ pub fn getRunningApplications(allocator: std.mem.Allocator) ![]*App {
 }
 
 fn scanAppsInDirectory(allocator: std.mem.Allocator, dir_path: []const u8, apps_map: *std.StringHashMap(void), all_apps: *std.ArrayList(*App)) !void {
-    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return;
-    defer dir.close();
+    const io = utils.io();
+    var dir = std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         if (entry.kind != .directory) continue;
         if (!std.mem.endsWith(u8, entry.name, ".app")) continue;
 
@@ -320,7 +322,7 @@ pub fn getAllApps(allocator: std.mem.Allocator) ![]*App {
         try scanAppsInDirectory(allocator, dir_path, &apps_map, &allApps);
     }
 
-    if (std.posix.getenv("HOME")) |home| {
+    if (utils.getenv("HOME")) |home| {
         const user_apps = try std.fmt.allocPrint(allocator, "{s}/Applications", .{home});
         defer allocator.free(user_apps);
         try scanAppsInDirectory(allocator, user_apps, &apps_map, &allApps);
@@ -378,8 +380,8 @@ fn initWindowInfoCache() void {
 fn getWindowInfo(window_id: c.CGWindowID) WindowInfo {
     var result: WindowInfo = .{
         .window_id = window_id,
-        .name = [_]u8{0} ** 256,
-        .owner = [_]u8{0} ** 256,
+        .name = @splat(0),
+        .owner = @splat(0),
         .pid = 0,
         .layer = 0,
         .is_on_screen = true,

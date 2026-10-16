@@ -12,6 +12,12 @@ const utils = @import("utils.zig");
 // Extern function mocks
 export fn toggleWindow() void {}
 export fn updateApps() void {}
+export fn updateWindows() void {}
+export fn showWindow() void {}
+export fn hideWindow() void {}
+export fn switchToWindowsMode() void {}
+export fn switchToAppsMode() void {}
+export fn openSelectedWindow() void {}
 export fn isWindowFocused() bool {
     return false;
 }
@@ -114,7 +120,7 @@ test "get_all_apps (fuzzy query)" {
     utils.setAllocator(allocator);
 
     // This simulates what get_apps does when a query is provided
-    const query = try allocator.dupeZ(u8, "ac");
+    const query = try allocator.dupeSentinel(u8, "ac", 0);
     defer allocator.free(query);
 
     const query_apps = lib.get_apps(query);

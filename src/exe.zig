@@ -4,7 +4,24 @@
 
 const std = @import("std");
 const swap = @import("swap");
-const c = @cImport(@cInclude("time.h"));
+const c = struct {
+    pub const time_t = i64;
+    pub const struct_tm = extern struct {
+        tm_sec: c_int,
+        tm_min: c_int,
+        tm_hour: c_int,
+        tm_mday: c_int,
+        tm_mon: c_int,
+        tm_year: c_int,
+        tm_wday: c_int,
+        tm_yday: c_int,
+        tm_isdst: c_int,
+        tm_gmtoff: c_long,
+        tm_zone: ?[*:0]const u8,
+    };
+    pub extern "c" fn time(t: ?*time_t) time_t;
+    pub extern "c" fn localtime_r(t: *const time_t, result: *struct_tm) ?*struct_tm;
+};
 
 // Extern function mocks
 export fn toggleWindow() void {}
@@ -24,9 +41,10 @@ pub fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    const stderr = std.fs.File.stderr();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const stderr = std.Io.File.stderr();
     var buffer: [1024]u8 = undefined;
-    var writer = stderr.writer(&buffer);
+    var writer = stderr.writer(io, &buffer);
 
     var now: c.time_t = c.time(null);
     var local: c.struct_tm = undefined;

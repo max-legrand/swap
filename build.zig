@@ -31,44 +31,49 @@ pub fn build(b: *std.Build) void {
         .os_tag = .macos,
     });
 
+    const aarch_c = translateCModule(b, aarch_target, optimize, include_path, frameworks_path);
+    const x86_c = translateCModule(b, x86_target, optimize, include_path, frameworks_path);
+
     const aarch_lib = b.addLibrary(.{
         .name = "swap_aarch64",
-        .root_module = b.addModule("swap", .{
+        .root_module = b.createModule(.{
             .root_source_file = b.path("src/lib.zig"),
             .target = aarch_target,
             .optimize = optimize,
             .imports = &.{
+                .{ .name = "swap-c", .module = aarch_c },
                 .{ .name = "zig_objc", .module = objc.module("objc") },
                 .{ .name = "sort", .module = sort.module("sort") },
             },
         }),
     });
-    aarch_lib.addFrameworkPath(.{ .cwd_relative = frameworks_path });
-    aarch_lib.addSystemIncludePath(.{ .cwd_relative = include_path });
-    aarch_lib.linkLibC();
-    aarch_lib.linkFramework("CoreFoundation");
-    aarch_lib.linkFramework("CoreGraphics");
-    aarch_lib.linkFramework("ApplicationServices");
+    aarch_lib.root_module.addFrameworkPath(.{ .cwd_relative = frameworks_path });
+    aarch_lib.root_module.addSystemIncludePath(.{ .cwd_relative = include_path });
+    aarch_lib.root_module.link_libc = true;
+    aarch_lib.root_module.linkFramework("CoreFoundation", .{});
+    aarch_lib.root_module.linkFramework("CoreGraphics", .{});
+    aarch_lib.root_module.linkFramework("ApplicationServices", .{});
     aarch_lib.bundle_compiler_rt = true;
 
     const x86_lib = b.addLibrary(.{
         .name = "swap_x86_64",
-        .root_module = b.addModule("swap", .{
+        .root_module = b.createModule(.{
             .root_source_file = b.path("src/lib.zig"),
             .target = x86_target,
             .optimize = optimize,
             .imports = &.{
+                .{ .name = "swap-c", .module = x86_c },
                 .{ .name = "zig_objc", .module = objc.module("objc") },
                 .{ .name = "sort", .module = sort.module("sort") },
             },
         }),
     });
-    x86_lib.addFrameworkPath(.{ .cwd_relative = frameworks_path });
-    x86_lib.addSystemIncludePath(.{ .cwd_relative = include_path });
-    x86_lib.linkLibC();
-    x86_lib.linkFramework("CoreFoundation");
-    x86_lib.linkFramework("CoreGraphics");
-    x86_lib.linkFramework("ApplicationServices");
+    x86_lib.root_module.addFrameworkPath(.{ .cwd_relative = frameworks_path });
+    x86_lib.root_module.addSystemIncludePath(.{ .cwd_relative = include_path });
+    x86_lib.root_module.link_libc = true;
+    x86_lib.root_module.linkFramework("CoreFoundation", .{});
+    x86_lib.root_module.linkFramework("CoreGraphics", .{});
+    x86_lib.root_module.linkFramework("ApplicationServices", .{});
     x86_lib.bundle_compiler_rt = true;
 
     // Install both libraries
@@ -108,11 +113,13 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(xcframework.step);
 
     const default_target = b.standardTargetOptions(.{});
+    const default_c = translateCModule(b, default_target, optimize, include_path, frameworks_path);
     const swap_mod = b.createModule(.{
         .root_source_file = b.path("src/lib.zig"),
         .target = default_target,
         .optimize = optimize,
         .imports = &.{
+            .{ .name = "swap-c", .module = default_c },
             .{ .name = "zig_objc", .module = objc.module("objc") },
             .{ .name = "sort", .module = sort.module("sort") },
         },
@@ -122,6 +129,7 @@ pub fn build(b: *std.Build) void {
         .target = default_target,
         .optimize = optimize,
         .imports = &.{
+            .{ .name = "swap-c", .module = default_c },
             .{ .name = "swap", .module = swap_mod },
             .{ .name = "zig_objc", .module = objc.module("objc") },
             .{ .name = "sort", .module = sort.module("sort") },
@@ -132,15 +140,15 @@ pub fn build(b: *std.Build) void {
         .root_module = test_mod,
         .test_runner = .{ .path = b.path("src/test_runner.zig"), .mode = .simple },
     });
-    tests.addFrameworkPath(.{ .cwd_relative = frameworks_path });
-    tests.addSystemIncludePath(.{ .cwd_relative = include_path });
-    tests.linkLibC();
-    tests.linkSystemLibrary("objc");
-    tests.linkFramework("Cocoa");
-    tests.linkFramework("Foundation");
-    tests.linkFramework("CoreFoundation");
-    tests.linkFramework("CoreGraphics");
-    tests.linkFramework("ApplicationServices");
+    tests.root_module.addFrameworkPath(.{ .cwd_relative = frameworks_path });
+    tests.root_module.addSystemIncludePath(.{ .cwd_relative = include_path });
+    tests.root_module.link_libc = true;
+    tests.root_module.linkSystemLibrary("objc", .{});
+    tests.root_module.linkFramework("Cocoa", .{});
+    tests.root_module.linkFramework("Foundation", .{});
+    tests.root_module.linkFramework("CoreFoundation", .{});
+    tests.root_module.linkFramework("CoreGraphics", .{});
+    tests.root_module.linkFramework("ApplicationServices", .{});
 
     const run_tests = b.addRunArtifact(tests);
 
@@ -159,22 +167,46 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
         .name = "swap-exe",
     });
-    exe.addFrameworkPath(.{ .cwd_relative = frameworks_path });
-    exe.addSystemIncludePath(.{ .cwd_relative = include_path });
-    exe.linkLibC();
-    exe.linkSystemLibrary("objc");
-    exe.linkFramework("Cocoa");
-    exe.linkFramework("Foundation");
-    exe.linkFramework("CoreFoundation");
-    exe.linkFramework("CoreGraphics");
-    exe.linkFramework("ApplicationServices");
+    exe.root_module.addFrameworkPath(.{ .cwd_relative = frameworks_path });
+    exe.root_module.addSystemIncludePath(.{ .cwd_relative = include_path });
+    exe.root_module.link_libc = true;
+    exe.root_module.linkSystemLibrary("objc", .{});
+    exe.root_module.linkFramework("Cocoa", .{});
+    exe.root_module.linkFramework("Foundation", .{});
+    exe.root_module.linkFramework("CoreFoundation", .{});
+    exe.root_module.linkFramework("CoreGraphics", .{});
+    exe.root_module.linkFramework("ApplicationServices", .{});
     b.installArtifact(exe);
     // Add a run step
     const run_step = b.step("run", "Run the app");
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
+}
+
+fn translateCModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    include_path: []const u8,
+    frameworks_path: []const u8,
+) *std.Build.Module {
+    const wf = b.addWriteFiles();
+    const header = wf.add("swap-c.h",
+        \\#include <CoreFoundation/CoreFoundation.h>
+        \\#include <CoreGraphics/CoreGraphics.h>
+        \\#include <ApplicationServices/ApplicationServices.h>
+        \\#include <dlfcn.h>
+        \\#include <unistd.h>
+        \\
+    );
+    const tc = b.addTranslateC(.{
+        .root_source_file = header,
+        .target = target,
+        .optimize = optimize,
+    });
+    tc.addSystemIncludePath(.{ .cwd_relative = include_path });
+    tc.addFrameworkPath(.{ .cwd_relative = frameworks_path });
+    return tc.createModule();
 }

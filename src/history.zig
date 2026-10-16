@@ -1,4 +1,5 @@
 const std = @import("std");
+const utils = @import("utils.zig");
 
 pub const HistoryEntry = struct {
     app_name: []const u8,
@@ -13,7 +14,7 @@ pub const History = struct {
     file_path: []const u8,
 
     pub fn init(allocator: std.mem.Allocator) !History {
-        const app_data_dir = try std.fs.getAppDataDir(allocator, "swap");
+        const app_data_dir = try utils.getAppDataDir(allocator, "swap");
         defer allocator.free(app_data_dir);
         const file_path = try std.fmt.allocPrint(allocator, "{s}/history", .{app_data_dir});
 
@@ -27,7 +28,7 @@ pub const History = struct {
     }
 
     pub fn record(self: *History, term: []const u8, app_name: []const u8) !void {
-        const now = std.time.milliTimestamp();
+        const now = utils.milliTimestamp();
 
         const exists = self.entries.contains(term);
         if (!exists) {
@@ -64,7 +65,7 @@ pub const History = struct {
 
     pub fn getRecencyBonus(self: *History, query: []const u8, app_name: []const u8) i32 {
         const list = self.entries.get(query) orelse return 0;
-        const now = std.time.milliTimestamp();
+        const now = utils.milliTimestamp();
 
         for (list.items) |entry| {
             if (std.mem.eql(u8, entry.app_name, app_name)) {
@@ -81,11 +82,11 @@ pub const History = struct {
     }
 
     fn loadFromDisk(self: *History) !void {
-        const file = try std.fs.openFileAbsolute(self.file_path, .{ .mode = .read_only });
-        defer file.close();
+        const file = try std.Io.Dir.openFileAbsolute(utils.io(), self.file_path, .{ .mode = .read_only });
+        defer file.close(utils.io());
 
         var buf: [1024]u8 = undefined;
-        var reader = file.reader(&buf);
+        var reader = file.reader(utils.io(), &buf);
 
         const lines = try reader.interface.allocRemaining(self.allocator, .unlimited);
         defer self.allocator.free(lines);
@@ -114,11 +115,11 @@ pub const History = struct {
     }
 
     pub fn saveToDisk(self: *History) !void {
-        const file = try std.fs.createFileAbsolute(self.file_path, .{});
-        defer file.close();
+        const file = try std.Io.Dir.createFileAbsolute(utils.io(), self.file_path, .{});
+        defer file.close(utils.io());
 
         var buf: [1024]u8 = undefined;
-        var writer = file.writer(&buf);
+        var writer = file.writer(utils.io(), &buf);
 
         var it = self.entries.iterator();
         while (it.next()) |entry| {

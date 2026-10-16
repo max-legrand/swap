@@ -3,6 +3,7 @@
 // See LICENSE for full terms.
 
 import SwapKit
+import os
 import SwiftUI
 
 // Global reference to the app delegate
@@ -125,8 +126,22 @@ func openSelectedWindow() {
         }
 
         if let _ = NSRunningApplication(processIdentifier: window.pid) {
-            // Focus the specific window - this should trigger space switch to wherever the window is
-            focusWindowById(pid: window.pid, windowId: window.windowId, windowName: window.name, isMinimized: window.isMinimized)
+            if window.windowId != 0 && cachedYabaiPath == nil {
+                // CLI calls can block while GlazeWM switches workspaces. Keep them off
+                // the main thread so the app remains responsive while focus changes.
+                DispatchQueue.global(qos: .userInteractive).async {
+                    let started = CFAbsoluteTimeGetCurrent()
+                    let ok = focusWindowViaGlazeWM(windowId: window.windowId)
+                    os_log("swap: glazewm focus+redraw ok=%{public}d in %{public}dms", ok ? 1 : 0, Int((CFAbsoluteTimeGetCurrent() - started) * 1000))
+                    guard !ok else { return }
+                    DispatchQueue.main.async {
+                        focusWindowById(pid: window.pid, windowId: window.windowId, windowName: window.name, isMinimized: window.isMinimized)
+                    }
+                }
+            } else {
+                // Focus the specific window - this should trigger space switch to wherever the window is
+                focusWindowById(pid: window.pid, windowId: window.windowId, windowName: window.name, isMinimized: window.isMinimized)
+            }
         } else {
             // App not running, try to open by path
             NSWorkspace.shared.openApplication(
@@ -141,6 +156,9 @@ func openSelectedWindow() {
 @_silgen_name("_AXUIElementGetWindow")
 func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
 
+// yabai's location, looked up once (the lookup can spawn `which`)
+let cachedYabaiPath: String? = getYabaiPath()
+
 // Get yabai path if available
 func getYabaiPath() -> String? {
     // Check common locations
@@ -149,56 +167,121 @@ func getYabaiPath() -> String? {
         "/usr/local/bin/yabai",
         "/run/current-system/sw/bin/yabai"  // NixOS
     ]
-    
+
     for path in possiblePaths {
         if FileManager.default.fileExists(atPath: path) {
             return path
         }
     }
-    
+
     // Try which
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-    process.arguments = ["yabai"]
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = pipe
-    
-    do {
-        try process.run()
-        process.waitUntilExit()
-        if process.terminationStatus == 0 {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
-                return path
-            }
-        }
-    } catch {}
-    
+    if let data = runCommand("/usr/bin/which", ["yabai"]),
+       let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+       !path.isEmpty {
+        return path
+    }
     return nil
 }
 
-// Focus a window using yabai
 func focusWindowViaYabai(windowId: UInt32) -> Bool {
-    guard let yabaiPath = getYabaiPath() else {
+    guard let yabaiPath = cachedYabaiPath else {
         return false
     }
-    
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: yabaiPath)
-    process.arguments = ["-m", "window", "--focus", "\(windowId)"]
-    
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = pipe
-    
-    do {
-        try process.run()
-        process.waitUntilExit()
-        return process.terminationStatus == 0
-    } catch {
+    return runCommand(yabaiPath, ["-m", "window", "--focus", "\(windowId)"]) != nil
+}
+
+// Get glazewm CLI path if available
+func getGlazeWMCliPath() -> String? {
+    let home = NSHomeDirectory()
+    let possiblePaths = [
+        "/Applications/GlazeWM.app/Contents/MacOS/glazewm-cli",
+        "\(home)/Applications/GlazeWM.app/Contents/MacOS/glazewm-cli",
+        "/opt/homebrew/bin/glazewm-cli",
+        "/usr/local/bin/glazewm-cli",
+        "/run/current-system/sw/bin/glazewm-cli"  // NixOS
+    ]
+    return possiblePaths.first { FileManager.default.isExecutableFile(atPath: $0) }
+}
+
+// Run an executable and return its stdout, or nil if it couldn't be launched or exited non-zero.
+// Uses posix_spawn directly: Foundation's Process costs ~70-90ms per launch, which is
+// noticeable when focusing a window needs a few CLI calls.
+func runCommand(_ path: String, _ arguments: [String]) -> Data? {
+    var fds: [Int32] = [0, 0]
+    guard pipe(&fds) == 0 else { return nil }
+
+    var fileActions: posix_spawn_file_actions_t? = nil
+    posix_spawn_file_actions_init(&fileActions)
+    defer { posix_spawn_file_actions_destroy(&fileActions) }
+    posix_spawn_file_actions_adddup2(&fileActions, fds[1], STDOUT_FILENO)
+    posix_spawn_file_actions_addopen(&fileActions, STDERR_FILENO, "/dev/null", O_WRONLY, 0)
+    posix_spawn_file_actions_addclose(&fileActions, fds[0])
+    posix_spawn_file_actions_addclose(&fileActions, fds[1])
+
+    let argv: [UnsafeMutablePointer<CChar>?] = ([path] + arguments).map { strdup($0) } + [nil]
+    defer { argv.forEach { free($0) } }
+
+    var pid: pid_t = 0
+    let rc = posix_spawn(&pid, path, &fileActions, nil, argv, environ)
+    close(fds[1])
+    guard rc == 0 else {
+        close(fds[0])
+        return nil
+    }
+
+    // Read before waiting so a large response can't fill the pipe and deadlock
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 65536)
+    while true {
+        let n = read(fds[0], &buffer, buffer.count)
+        if n > 0 {
+            data.append(buffer, count: n)
+        } else if n < 0 && errno == EINTR {
+            continue
+        } else {
+            break
+        }
+    }
+    close(fds[0])
+
+    var status: Int32 = 0
+    while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
+    let exitedNormally = (status & 0x7f) == 0
+    return (exitedNormally && ((status >> 8) & 0xff) == 0) ? data : nil
+}
+
+func runGlazeWM(_ cliPath: String, _ arguments: [String]) -> Data? {
+    return runCommand(cliPath, arguments)
+}
+
+// Focus a window through glazewm. glazewm's window `handle` is the CGWindowID, and
+// `focus --container-id` switches to the window's workspace/monitor as needed.
+func focusWindowViaGlazeWM(windowId: UInt32) -> Bool {
+    guard let cli = getGlazeWMCliPath(),
+          let data = runGlazeWM(cli, ["query", "windows"]),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          (json["success"] as? Bool) == true,
+          let payload = json["data"] as? [String: Any],
+          let windows = payload["windows"] as? [[String: Any]]
+    else {
         return false
     }
+
+    guard let match = windows.first(where: { ($0["handle"] as? NSNumber)?.uint32Value == windowId }),
+          let containerId = match["id"] as? String
+    else {
+        return false
+    }
+
+    guard runGlazeWM(cli, ["command", "focus", "--container-id", containerId]) != nil else {
+        return false
+    }
+
+    // On macOS, GlazeWM can update its focused workspace without refreshing the
+    // cloaked/visible state of windows on other workspaces. Force a redraw so the
+    // old workspace is hidden and the selected workspace is shown immediately.
+    _ = runGlazeWM(cli, ["command", "wm-redraw"])
+    return true
 }
 
 // Focus a specific window by its window ID, switching spaces if needed
@@ -267,7 +350,16 @@ func focusWindowById(pid: Int32, windowId: UInt32, windowName: String, isMinimiz
         return
     }
     
-    // yabai not available or failed - fall back to AX-only focusing.
+    // glazewm owns window placement and workspaces; its focus command switches to the
+    // window's workspace/monitor and focuses it, so don't fight it with AX afterwards.
+    if windowId != 0 {
+        let started = CFAbsoluteTimeGetCurrent()
+        let ok = focusWindowViaGlazeWM(windowId: windowId)
+        os_log("swap: glazewm focus ok=%{public}d in %{public}dms", ok ? 1 : 0, Int((CFAbsoluteTimeGetCurrent() - started) * 1000))
+        if ok { return }
+    }
+
+    // yabai/glazewm not available or failed - fall back to AX-only focusing.
     // This works correctly for windows on the current monitor/space.
     if let window = findWindowViaAX() {
         // Activate the app FIRST (with activateIgnoringOtherApps), then raise the window.

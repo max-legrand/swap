@@ -2,13 +2,7 @@
 // Copyright (c) 2025 Max Legrand
 // See LICENSE for full terms.
 
-pub const c = @cImport({
-    @cInclude("CoreFoundation/CoreFoundation.h");
-    @cInclude("CoreGraphics/CoreGraphics.h");
-    @cInclude("ApplicationServices/ApplicationServices.h");
-    @cInclude("dlfcn.h");
-    @cInclude("unistd.h");
-});
+pub const c = @import("swap-c");
 
 pub extern "ApplicationServices" fn CGSMainConnectionID() callconv(.c) c_uint;
 pub extern "ApplicationServices" fn CGSCopyManagedDisplaySpaces(connection: c_uint) callconv(.c) ?*anyopaque;

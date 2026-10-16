@@ -3,7 +3,8 @@
 // See LICENSE for full terms.
 
 const std = @import("std");
-const ALLOCATOR = @import("utils.zig").allocator;
+const utils = @import("utils.zig");
+const ALLOCATOR = utils.allocator;
 
 const Color = struct {
     red: u8,
@@ -91,10 +92,10 @@ pub const Config = struct {
 };
 
 fn getDefaultLogPath(allocator: std.mem.Allocator) ![]const u8 {
-    const app_data_dir = try std.fs.getAppDataDir(allocator, "swap");
+    const app_data_dir = try utils.getAppDataDir(allocator, "swap");
     defer allocator.free(app_data_dir);
 
-    std.fs.makeDirAbsolute(app_data_dir) catch |err| {
+    std.Io.Dir.createDirAbsolute(utils.io(), app_data_dir, .default_dir) catch |err| {
         if (err != error.PathAlreadyExists) {
             return err;
         }
@@ -105,13 +106,14 @@ fn getDefaultLogPath(allocator: std.mem.Allocator) ![]const u8 {
 
 pub fn parseConfig(allocator: std.mem.Allocator) !Config {
     const file = try getOrInitConfigFile(allocator);
+    defer file.close(utils.io());
     const default_log_path = try getDefaultLogPath(allocator);
     var config = Config{
         .log_file_path = default_log_path,
     };
 
     var buf: [1024]u8 = undefined;
-    var file_reader = file.reader(&buf);
+    var file_reader = file.reader(utils.io(), &buf);
     var reader = &file_reader.interface;
 
     const file_data = try reader.allocRemaining(allocator, .unlimited);
@@ -153,10 +155,10 @@ pub fn parseConfig(allocator: std.mem.Allocator) !Config {
 }
 
 pub fn getConfigFilePath(allocator: std.mem.Allocator) ![]const u8 {
-    const app_data_dir = try std.fs.getAppDataDir(allocator, "swap");
+    const app_data_dir = try utils.getAppDataDir(allocator, "swap");
     defer allocator.free(app_data_dir);
 
-    std.fs.makeDirAbsolute(app_data_dir) catch |err| {
+    std.Io.Dir.createDirAbsolute(utils.io(), app_data_dir, .default_dir) catch |err| {
         if (err != error.PathAlreadyExists) {
             return err;
         }
@@ -164,14 +166,14 @@ pub fn getConfigFilePath(allocator: std.mem.Allocator) ![]const u8 {
     return try std.fmt.allocPrint(allocator, "{s}/swap.config", .{app_data_dir});
 }
 
-pub fn getOrInitConfigFile(allocator: std.mem.Allocator) !std.fs.File {
+pub fn getOrInitConfigFile(allocator: std.mem.Allocator) !std.Io.File {
     const config_file = try getConfigFilePath(allocator);
     defer allocator.free(config_file);
 
     const swap_dir = std.fs.path.dirname(config_file) orelse return error.InvalidPath;
 
     var dir_exists = true;
-    std.fs.accessAbsolute(swap_dir, .{ .mode = .read_only }) catch |err| {
+    std.Io.Dir.accessAbsolute(utils.io(), swap_dir, .{ .read = true }) catch |err| {
         switch (err) {
             error.FileNotFound => {
                 dir_exists = false;
@@ -180,11 +182,11 @@ pub fn getOrInitConfigFile(allocator: std.mem.Allocator) !std.fs.File {
         }
     };
     if (!dir_exists) {
-        try std.fs.makeDirAbsolute(swap_dir);
+        try std.Io.Dir.createDirAbsolute(utils.io(), swap_dir, .default_dir);
     }
 
     var file_exists = true;
-    std.fs.accessAbsolute(config_file, .{ .mode = .read_only }) catch |err| {
+    std.Io.Dir.accessAbsolute(utils.io(), config_file, .{ .read = true }) catch |err| {
         switch (err) {
             error.FileNotFound => {
                 file_exists = false;
@@ -193,9 +195,9 @@ pub fn getOrInitConfigFile(allocator: std.mem.Allocator) !std.fs.File {
         }
     };
 
-    var file: std.fs.File = undefined;
+    var file: std.Io.File = undefined;
     if (!file_exists) {
-        file = try std.fs.createFileAbsolute(config_file, .{});
+        file = try std.Io.Dir.createFileAbsolute(utils.io(), config_file, .{ .read = true });
         const default_log_path = try getDefaultLogPath(allocator);
         var config = Config{
             .log_file_path = default_log_path,
@@ -203,7 +205,7 @@ pub fn getOrInitConfigFile(allocator: std.mem.Allocator) !std.fs.File {
         defer config.deinit(allocator);
         // Write default config
         var buf: [1024]u8 = undefined;
-        var fw = file.writer(&buf);
+        var fw = file.writer(utils.io(), &buf);
         var writer = &fw.interface;
 
         const config_str = try config.to_file(allocator);
@@ -211,7 +213,7 @@ pub fn getOrInitConfigFile(allocator: std.mem.Allocator) !std.fs.File {
         try writer.writeAll(config_str);
         try writer.flush();
     } else {
-        file = try std.fs.openFileAbsolute(config_file, .{});
+        file = try std.Io.Dir.openFileAbsolute(utils.io(), config_file, .{});
     }
 
     return file;

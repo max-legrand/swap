@@ -25,7 +25,7 @@ const KeybindMode = enum(u8) {
 const DisplayMode = enum { apps, windows };
 
 pub const AppState = struct {
-    log_file: std.fs.File,
+    log_file: std.Io.File,
     apps: []*application.App,
     windows: []*darwin.WindowInfo,
     index: usize,
@@ -40,7 +40,7 @@ pub const AppState = struct {
     pub fn init() !AppState {
         const cfg = try config.parseConfig(ALLOCATOR);
         var state: Self = .{
-            .log_file = try std.fs.createFileAbsolute(cfg.log_file_path, .{ .truncate = false }),
+            .log_file = try std.Io.Dir.createFileAbsolute(utils.io(), cfg.log_file_path, .{ .truncate = false }),
             .apps = &[_]*application.App{},
             .index = 0,
             .window_visible = false,
@@ -60,17 +60,18 @@ pub const AppState = struct {
             std.debug.print("Failed to log swap_deinit\n", .{});
         };
         self.config.deinit(ALLOCATOR);
-        self.log_file.close();
+        self.log_file.close(utils.io());
         self.* = undefined;
     }
 
     pub fn logCallback(self: *Self, msg: []const u8) !void {
-        const now = std.time.milliTimestamp();
+        const now = utils.milliTimestamp();
         const formatted = try std.fmt.allocPrint(ALLOCATOR, "[{d}] {s}\n", .{ now, msg });
         defer ALLOCATOR.free(formatted);
-        try self.log_file.seekFromEnd(0);
+        const io = utils.io();
         var log_buffer: [4096]u8 = undefined;
-        var file_writer = self.log_file.writerStreaming(&log_buffer);
+        var file_writer = self.log_file.writer(io, &log_buffer);
+        try file_writer.seekTo(try self.log_file.length(io));
         try file_writer.interface.writeAll(formatted);
         try file_writer.interface.flush();
     }
@@ -93,7 +94,7 @@ export fn swap_deinit() void {
 
 export fn get_timestamp() c_long {
     Global_State.logCallback("get_timestamp") catch {};
-    return @intCast(std.time.milliTimestamp());
+    return @intCast(utils.milliTimestamp());
 }
 
 pub const SwapAppInfo = extern struct {
@@ -310,13 +311,13 @@ pub export fn get_apps(query_opt: ?[*:0]u8) ?*AppReturn {
     };
     for (query_apps) |a| {
         apps.appendAssumeCapacity(.{
-            .name = ALLOCATOR.dupeZ(u8, std.mem.sliceTo(&a.name, 0)) catch {
+            .name = ALLOCATOR.dupeSentinel(u8, std.mem.sliceTo(&a.name, 0), 0) catch {
                 return null;
             },
             .pid = @intCast(a.pid),
             .zindex = @intCast(a.zindex),
             .is_running = a.is_running,
-            .path = ALLOCATOR.dupeZ(u8, std.mem.sliceTo(&a.path, 0)) catch {
+            .path = ALLOCATOR.dupeSentinel(u8, std.mem.sliceTo(&a.path, 0), 0) catch {
                 return null;
             },
         });
@@ -552,13 +553,13 @@ export fn update_apps() ?*AppReturn {
 
     for (Global_State.apps) |a| {
         items.appendAssumeCapacity(.{
-            .name = ALLOCATOR.dupeZ(u8, std.mem.sliceTo(&a.name, 0)) catch {
+            .name = ALLOCATOR.dupeSentinel(u8, std.mem.sliceTo(&a.name, 0), 0) catch {
                 return null;
             },
             .pid = @intCast(a.pid),
             .zindex = @intCast(a.zindex),
             .is_running = a.is_running,
-            .path = ALLOCATOR.dupeZ(u8, std.mem.sliceTo(&a.path, 0)) catch {
+            .path = ALLOCATOR.dupeSentinel(u8, std.mem.sliceTo(&a.path, 0), 0) catch {
                 return null;
             },
         });
@@ -592,11 +593,7 @@ fn openApp() void {
     }
 
     const path: []const u8 = std.mem.sliceTo(&app.path, 0);
-    var child = std.process.Child.init(
-        &[_][]const u8{ "open", path },
-        ALLOCATOR,
-    );
-    child.spawn() catch {};
+    utils.spawnDetached(&[_][]const u8{ "open", path });
 }
 
 fn killApp() void {
@@ -609,11 +606,7 @@ fn killApp() void {
 
     const pid_str = std.fmt.allocPrint(ALLOCATOR, "{d}", .{pid}) catch return;
     defer ALLOCATOR.free(pid_str);
-    var child = std.process.Child.init(
-        &[_][]const u8{ "kill", pid_str },
-        ALLOCATOR,
-    );
-    child.spawn() catch {};
+    utils.spawnDetached(&[_][]const u8{ "kill", pid_str });
     var items = std.ArrayList(*application.App).initCapacity(ALLOCATOR, Global_State.apps.len - 1) catch {
         return;
     };
@@ -639,11 +632,7 @@ fn killApp() void {
 fn quitApp(pid: c_int) void {
     const pid_str = std.fmt.allocPrint(ALLOCATOR, "{d}", .{pid}) catch return;
     defer ALLOCATOR.free(pid_str);
-    var child = std.process.Child.init(
-        &[_][]const u8{ "kill", pid_str },
-        ALLOCATOR,
-    );
-    child.spawn() catch {};
+    utils.spawnDetached(&[_][]const u8{ "kill", pid_str });
 }
 
 fn killWindow() void {
@@ -772,11 +761,7 @@ pub export fn openConfigFile() void {
     const config_path = config.getConfigFilePath(ALLOCATOR) catch return;
     defer ALLOCATOR.free(config_path);
 
-    var child = std.process.Child.init(
-        &[_][]const u8{ "open", "-a", "TextEdit", config_path },
-        ALLOCATOR,
-    );
-    child.spawn() catch {};
+    utils.spawnDetached(&[_][]const u8{ "open", "-a", "TextEdit", config_path });
 }
 
 /// Return the current config color as RGB values
@@ -803,11 +788,18 @@ extern fn switchToWindowsMode() void;
 extern fn switchToAppsMode() void;
 extern fn openSelectedWindow() void;
 
+fn logf(comptime fmt: []const u8, args: anytype) void {
+    const msg = std.fmt.allocPrint(ALLOCATOR, fmt, args) catch return;
+    defer ALLOCATOR.free(msg);
+    Global_State.logCallback(msg) catch {};
+}
+
 pub export fn get_windows() ?*WindowReturn {
     const windows = darwin.getWindowList(ALLOCATOR) catch {
         return null;
     };
     defer ALLOCATOR.free(windows);
+    logf("get_windows: {d} windows (screen recording permission: {})", .{ windows.len, c.CGPreflightScreenCaptureAccess() });
 
     var items = std.ArrayList(SwapWindowInfo).initCapacity(ALLOCATOR, windows.len) catch {
         return null;
@@ -816,10 +808,10 @@ pub export fn get_windows() ?*WindowReturn {
     for (windows) |w| {
         items.appendAssumeCapacity(.{
             .window_id = w.window_id,
-            .name = ALLOCATOR.dupeZ(u8, std.mem.sliceTo(&w.name, 0)) catch {
+            .name = ALLOCATOR.dupeSentinel(u8, std.mem.sliceTo(&w.name, 0), 0) catch {
                 return null;
             },
-            .owner = ALLOCATOR.dupeZ(u8, std.mem.sliceTo(&w.owner, 0)) catch {
+            .owner = ALLOCATOR.dupeSentinel(u8, std.mem.sliceTo(&w.owner, 0), 0) catch {
                 return null;
             },
             .pid = w.pid,
@@ -859,9 +851,9 @@ pub export fn set_mode(mode: u8) void {
 }
 
 var WINDOW_COUNT: usize = 0;
-var WINDOW_IDS: [256]u32 = [_]u32{0} ** 256;
-var WINDOW_PIDS: [256]i32 = [_]i32{0} ** 256;
-var WINDOW_PATHS: [256][512]u8 = [_][512]u8{[_]u8{0} ** 512} ** 256;
+var WINDOW_IDS: [256]u32 = @splat(0);
+var WINDOW_PIDS: [256]i32 = @splat(0);
+var WINDOW_PATHS: [256][512]u8 = @splat(@splat(0));
 
 pub export fn set_window_count(count: usize) void {
     WINDOW_COUNT = count;
@@ -886,18 +878,23 @@ pub export fn set_selected_index(index: usize) void {
 }
 
 fn openWindowOrApp() void {
-    if (Global_State.index >= WINDOW_COUNT) return;
+    if (Global_State.index >= WINDOW_COUNT) {
+        logf("openWindowOrApp: index {d} >= WINDOW_COUNT {d}", .{ Global_State.index, WINDOW_COUNT });
+        return;
+    }
 
     const window_id = WINDOW_IDS[Global_State.index];
+    logf("openWindowOrApp: index={d} window_id={d} pid={d} name='{s}'", .{
+        Global_State.index,
+        window_id,
+        WINDOW_PIDS[Global_State.index],
+        std.mem.sliceTo(&WINDOW_PATHS[Global_State.index], 0),
+    });
     if (window_id == 0) {
         // No specific window, just open the app by path
         const path = std.mem.sliceTo(&WINDOW_PATHS[Global_State.index], 0);
         if (path.len > 0) {
-            var child = std.process.Child.init(
-                &[_][]const u8{ "open", path },
-                ALLOCATOR,
-            );
-            child.spawn() catch {};
+            utils.spawnDetached(&[_][]const u8{ "open", path });
         }
     } else {
         // Has a specific window, let Swift handle it
